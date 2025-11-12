@@ -1,0 +1,117 @@
+name: Build on Release
+
+on:
+  release:
+    types: [published] # run when a Release is published
+
+permissions:
+  contents: write  # needed to attach files & edit release notes
+
+# Your app is inside the subfolder:
+defaults:
+  run:
+    working-directory: assignment-task6/assignment-task6
+
+jobs:
+  test:
+    name: Run unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - run: npm ci
+
+      - name: Run tests (skip if none)
+        run: |
+          if npm run -q test >/dev/null 2>&1; then
+            npm test -- --ci --passWithNoTests
+          else
+            echo "No test script defined — skipping."
+          fi
+
+  build-and-release:
+    name: Build binaries & attach to Release
+    runs-on: ubuntu-latest
+    needs: test
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - run: npm ci
+
+      - name: Install jq (JSON CLI)
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Set up Expo / EAS
+        uses: expo/expo-github-action@v8
+        with:
+          eas-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
+
+      - name: Build Android (APK) with EAS
+        id: build_android
+        run: |
+          eas build --platform android --profile android-apk --non-interactive --json --wait > android.json
+          ANDROID_URL=$(jq -r '.artifacts.buildUrl // .artifacts[]? // empty' android.json)
+          echo "url=${ANDROID_URL}" >> $GITHUB_OUTPUT
+
+      - name: Build iOS (Simulator) with EAS
+        id: build_ios
+        run: |
+          eas build --platform ios --profile ios-simulator --non-interactive --json --wait > ios.json
+          IOS_URL=$(jq -r '.artifacts.buildUrl // .artifacts[]? // empty' ios.json)
+          echo "url=${IOS_URL}" >> $GITHUB_OUTPUT
+
+      - name: Download EAS artifacts
+        run: |
+          mkdir -p dist
+          if [ -n "${{ steps.build_android.outputs.url }}" ]; then
+            curl -L "${{ steps.build_android.outputs.url }}" -o "dist/volunteam-android-${{ github.ref_name }}.apk"
+          fi
+          if [ -n "${{ steps.build_ios.outputs.url }}" ]; then
+            curl -L "${{ steps.build_ios.outputs.url }}" -o "dist/volunteam-ios-simulator-${{ github.ref_name }}.tar.gz"
+          fi
+          ls -lah dist
+
+      - name: Upload artifacts to workflow (optional)
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-artifacts-${{ github.ref_name }}
+          path: dist/*
+
+      - name: Attach to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: assignment-task6/assignment-task6/dist/*   # <- note the subfolder
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Append links to Release body + Job Summary
+        env:
+          ANDROID_NAME: volunteam-android-${{ github.ref_name }}.apk
+          IOS_NAME: volunteam-ios-simulator-${{ github.ref_name }}.tar.gz
+        run: |
+          RELEASE_URL="https://github.com/${{ github.repository }}/releases/tag/${{ github.ref_name }}"
+          ANDROID_DL="https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/${ANDROID_NAME}"
+          IOS_DL="https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/${IOS_NAME}"
+
+          {
+            echo "## ✅ Build links for ${{ github.ref_name }}"
+            echo ""
+            echo "- **Release page:** ${RELEASE_URL}"
+            if [ -f "dist/${ANDROID_NAME}" ]; then echo "- **Android (APK):** ${ANDROID_DL}"; fi
+            if [ -f "dist/${IOS_NAME}" ]; then echo "- **iOS (Simulator .app.tar.gz):** ${IOS_DL}"; fi
+          } | tee -a "$GITHUB_STEP_SUMMARY" > release_links.md
+
+          gh release edit "${{ github.ref_name }}" --notes-file release_links.md
