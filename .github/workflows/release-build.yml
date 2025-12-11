@@ -1,3 +1,29 @@
+name: release-build
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm test
+
   build-and-release:
     name: Build binaries & attach to Release
     needs: test
@@ -6,50 +32,52 @@
       EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
     steps:
       - uses: actions/checkout@v4
-
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: npm
 
-      - name: Install tooling
+      - name: Install tooling (jq + EAS CLI)
         run: |
           sudo apt-get update
           sudo apt-get install -y jq
+          npm i -g eas-cli@^16.28.0
 
       - name: Verify Expo auth
-        run: npx --yes eas-cli@latest whoami
+        run: eas whoami
 
       - name: EAS build (iOS Simulator)
         run: |
           set -euo pipefail
           mkdir -p dist
           IOS_JSON=$(mktemp)
-          npx --yes eas-cli@latest build --platform ios --profile ios-simulator --non-interactive --wait --json > "$IOS_JSON"
+          eas build --platform ios --profile ios-simulator --non-interactive --wait --json > "$IOS_JSON"
           cat "$IOS_JSON"
           IOS_ID=$(jq -r '.[0].id' "$IOS_JSON")
           if [ -z "$IOS_ID" ] || [ "$IOS_ID" = "null" ]; then
             echo "::error::No iOS build ID returned."; exit 1
           fi
-          npx --yes eas-cli@latest build:download -i "$IOS_ID" -o dist/volunteam-ios-simulator.tar.gz
+          eas build:download -i "$IOS_ID" -o dist/volunteam-ios-simulator.tar.gz
 
-      # Optional Android (ignore failure if creds not set)
       - name: (Optional) EAS build Android APK
         continue-on-error: true
         run: |
           set -euo pipefail
           AND_JSON=$(mktemp)
-          if npx --yes eas-cli@latest build --platform android --profile android-apk --non-interactive --wait --json > "$AND_JSON"; then
+          if eas build --platform android --profile android-apk --non-interactive --wait --json > "$AND_JSON"; then
             AND_ID=$(jq -r '.[0].id' "$AND_JSON")
             if [ -n "$AND_ID" ] && [ "$AND_ID" != "null" ]; then
-              npx --yes eas-cli@latest build:download -i "$AND_ID" -o dist/volunteam-android.apk
+              eas build:download -i "$AND_ID" -o dist/volunteam-android.apk
             fi
           else
             echo "::warning::Android build skipped (likely missing credentials)."
           fi
 
       - name: Upload to the GitHub Release
-        uses: softprops/action-gh-release@v2
         if: ${{ github.event_name == 'release' && github.event.action == 'published' }}
+        uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/*.apk
