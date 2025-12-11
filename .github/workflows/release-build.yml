@@ -24,6 +24,8 @@ jobs:
     name: Build binaries & attach to Release
     needs: test
     runs-on: ubuntu-latest
+    env:
+      EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
@@ -37,24 +39,29 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y jq
 
-      - name: EAS build (Android APK + iOS Simulator)
-        env:
-          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+      - name: EAS build (iOS Simulator then Android)
         run: |
           set -euo pipefail
           mkdir -p dist
 
-          # Android (wait for completion and capture build id)
-          ANDROID_JSON=$(mktemp)
-          eas build --platform android --profile android-apk --non-interactive --wait --json > "$ANDROID_JSON"
-          ANDROID_ID=$(jq -r '.[0].id' "$ANDROID_JSON") || true
-          [ "$ANDROID_ID" != "null" ] && eas build:download -i "$ANDROID_ID" -o dist/volunteam-android.apk || echo "No Android artifact."
-
-          # iOS simulator (wait and download)
+          # iOS simulator (no Apple creds needed)
           IOS_JSON=$(mktemp)
           eas build --platform ios --profile ios-simulator --non-interactive --wait --json > "$IOS_JSON"
-          IOS_ID=$(jq -r '.[0].id' "$IOS_JSON") || true
-          [ "$IOS_ID" != "null" ] && eas build:download -i "$IOS_ID" -o dist/volunteam-ios-simulator.tar.gz || echo "No iOS artifact."
+          IOS_ID=$(jq -r '.[0].id' "$IOS_JSON" || echo null)
+          if [ "$IOS_ID" != "null" ] && [ -n "$IOS_ID" ]; then
+            eas build:download -i "$IOS_ID" -o dist/volunteam-ios-simulator.tar.gz || true
+          fi
+
+          # Android APK (allow failure so submission still has iOS asset)
+          AND_JSON=$(mktemp)
+          if eas build --platform android --profile android-apk --non-interactive --wait --json > "$AND_JSON"; then
+            AND_ID=$(jq -r '.[0].id' "$AND_JSON" || echo null)
+            if [ "$AND_ID" != "null" ] && [ -n "$AND_ID" ]; then
+              eas build:download -i "$AND_ID" -o dist/volunteam-android.apk || true
+            fi
+          else
+            echo "::warning::Android build failed (likely credentials not set). Skipping APK for now."
+          fi
 
       - name: Upload to the GitHub Release
         uses: softprops/action-gh-release@v2
