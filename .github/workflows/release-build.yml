@@ -9,87 +9,57 @@ permissions:
 
 jobs:
   test:
+    name: Run unit tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: 'npm'
+          cache: npm
       - run: npm ci
-      - name: Run tests (skip if none)
-        run: |
-          if npm run -q test >/dev/null 2>&1; then
-            npm test -- --ci --passWithNoTests
-          else
-            echo "No test script defined — skipping."
-          fi
+      - run: npm test
 
   build-and-release:
-    runs-on: ubuntu-latest
+    name: Build binaries & attach to Release
     needs: test
-    permissions:
-      contents: write
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: 'npm'
-      - run: npm ci
-      - name: Install jq (JSON CLI)
-        run: sudo apt-get update && sudo apt-get install -y jq
-      - name: Set up Expo / EAS
-        uses: expo/expo-github-action@v8
-        with:
-          eas-version: latest
-          token: ${{ secrets.EXPO_TOKEN }}
-      - name: Build Android (APK)
-        id: build_android
+
+      - name: Install tooling
         run: |
-          eas build --platform android --profile android-apk --non-interactive --json --wait > android.json
-          ANDROID_URL=$(jq -r '.artifacts.buildUrl // .artifacts[]? // empty' android.json)
-          echo "url=${ANDROID_URL}" >> $GITHUB_OUTPUT
-      - name: Build iOS (Simulator)
-        id: build_ios
+          npm i -g eas-cli@^12
+          sudo apt-get update
+          sudo apt-get install -y jq
+
+      - name: EAS build (Android APK + iOS Simulator)
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
         run: |
-          eas build --platform ios --profile ios-simulator --non-interactive --json --wait > ios.json
-          IOS_URL=$(jq -r '.artifacts.buildUrl // .artifacts[]? // empty' ios.json)
-          echo "url=${IOS_URL}" >> $GITHUB_OUTPUT
-      - name: Download EAS artifacts
-        run: |
+          set -euo pipefail
           mkdir -p dist
-          if [ -n "${{ steps.build_android.outputs.url }}" ]; then
-            curl -L "${{ steps.build_android.outputs.url }}" -o "dist/volunteam-android-${{ github.ref_name }}.apk"
-          fi
-          if [ -n "${{ steps.build_ios.outputs.url }}" ]; then
-            curl -L "${{ steps.build_ios.outputs.url }}" -o "dist/volunteam-ios-simulator-${{ github.ref_name }}.tar.gz"
-          fi
-          ls -lah dist
-      - name: Upload artifacts to workflow (optional)
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-artifacts-${{ github.ref_name }}
-          path: dist/*
-      - name: Attach to GitHub Release
+
+          # Android (wait for completion and capture build id)
+          ANDROID_JSON=$(mktemp)
+          eas build --platform android --profile android-apk --non-interactive --wait --json > "$ANDROID_JSON"
+          ANDROID_ID=$(jq -r '.[0].id' "$ANDROID_JSON") || true
+          [ "$ANDROID_ID" != "null" ] && eas build:download -i "$ANDROID_ID" -o dist/volunteam-android.apk || echo "No Android artifact."
+
+          # iOS simulator (wait and download)
+          IOS_JSON=$(mktemp)
+          eas build --platform ios --profile ios-simulator --non-interactive --wait --json > "$IOS_JSON"
+          IOS_ID=$(jq -r '.[0].id' "$IOS_JSON") || true
+          [ "$IOS_ID" != "null" ] && eas build:download -i "$IOS_ID" -o dist/volunteam-ios-simulator.tar.gz || echo "No iOS artifact."
+
+      - name: Upload to the GitHub Release
         uses: softprops/action-gh-release@v2
+        if: ${{ github.event_name == 'release' && github.event.action == 'published' }}
         with:
-          files: dist/*
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - name: Append links to Release body + Job Summary
-        env:
-          ANDROID_NAME: volunteam-android-${{ github.ref_name }}.apk
-          IOS_NAME: volunteam-ios-simulator-${{ github.ref_name }}.tar.gz
-        run: |
-          RELEASE_URL="https://github.com/${{ github.repository }}/releases/tag/${{ github.ref_name }}"
-          ANDROID_DL="https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/${ANDROID_NAME}"
-          IOS_DL="https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/${IOS_NAME}"
-          {
-            echo "## ✅ Build links for ${{ github.ref_name }}"
-            echo ""
-            echo "- **Release page:** ${RELEASE_URL}"
-            if [ -f "dist/${ANDROID_NAME}" ]; then echo "- **Android (APK):** ${ANDROID_DL}"; fi
-            if [ -f "dist/${IOS_NAME}" ]; then echo "- **iOS (Simulator .app.tar.gz):** ${IOS_DL}"; fi
-          } | tee -a "$GITHUB_STEP_SUMMARY" > release_links.md
-          gh release edit "${{ github.ref_name }}" --notes-file release_links.md
+          files: |
+            dist/*.apk
+            dist/*.tar.gz
