@@ -28,7 +28,6 @@ jobs:
       EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -39,28 +38,33 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y jq
 
-      - name: EAS build (iOS Simulator then Android)
+      - name: Verify Expo auth
+        run: npx eas-cli whoami
+
+      - name: EAS build (iOS Simulator)
         run: |
           set -euo pipefail
           mkdir -p dist
-
-          # iOS simulator (no Apple creds needed)
           IOS_JSON=$(mktemp)
-          eas build --platform ios --profile ios-simulator --non-interactive --wait --json > "$IOS_JSON"
-          IOS_ID=$(jq -r '.[0].id' "$IOS_JSON" || echo null)
-          if [ "$IOS_ID" != "null" ] && [ -n "$IOS_ID" ]; then
-            eas build:download -i "$IOS_ID" -o dist/volunteam-ios-simulator.tar.gz || true
+          npx eas-cli build --platform ios --profile ios-simulator --non-interactive --wait --json > "$IOS_JSON"
+          cat "$IOS_JSON"
+          IOS_ID=$(jq -r '.[0].id' "$IOS_JSON")
+          if [ "$IOS_ID" = "null" ] || [ -z "$IOS_ID" ]; then
+            echo "::error::No iOS build ID returned."; exit 1
           fi
+          npx eas-cli build:download -i "$IOS_ID" -o dist/volunteam-ios-simulator.tar.gz
 
-          # Android APK (allow failure so submission still has iOS asset)
+      # Optional: try Android APK, but ignore failure (first run usually needs credentials)
+      - name: (Optional) EAS build Android APK
+        continue-on-error: true
+        run: |
+          set -euo pipefail
           AND_JSON=$(mktemp)
-          if eas build --platform android --profile android-apk --non-interactive --wait --json > "$AND_JSON"; then
-            AND_ID=$(jq -r '.[0].id' "$AND_JSON" || echo null)
-            if [ "$AND_ID" != "null" ] && [ -n "$AND_ID" ]; then
-              eas build:download -i "$AND_ID" -o dist/volunteam-android.apk || true
-            fi
+          if npx eas-cli build --platform android --profile android-apk --non-interactive --wait --json > "$AND_JSON"; then
+            AND_ID=$(jq -r '.[0].id' "$AND_JSON")
+            [ "$AND_ID" != "null" ] && npx eas-cli build:download -i "$AND_ID" -o dist/volunteam-android.apk
           else
-            echo "::warning::Android build failed (likely credentials not set). Skipping APK for now."
+            echo "::warning::Android build skipped (likely missing credentials)."
           fi
 
       - name: Upload to the GitHub Release
