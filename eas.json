@@ -1,15 +1,10 @@
 {
-  "cli": { "version": ">= 16.28.0" },
+  "cli": { "version": ">= 16.28.0", "appVersionSource": "remote" },
   "build": {
     "development": {},
     "preview": {},
     "production": {},
-    "ios-simulator": {
-      "ios": { "simulator": true },
-      "distribution": "internal"
-    },
-    "android-apk": {
-      "android": { "buildType": "apk" }
-    }
+    "ios-simulator": { "ios": { "simulator": true }, "distribution": "internal" },
+    "android-apk": { "android": { "buildType": "apk" } }
   }
 }
